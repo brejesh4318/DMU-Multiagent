@@ -1,0 +1,234 @@
+===== CELL 3 =====
+# =========================================================
+# CELL 2 — CONFIG
+# =========================================================
+
+CFG = {
+    'DATA_DIR':       r'E:\CODING\ed\data',
+    'FAISS_DIR':      './faiss_store',
+    'DB_PATH':        './dmu.duckdb',
+    'EMBED_MODEL':    'BAAI/bge-small-en-v1.5',
+    'LLM_MODEL':      'llama-3.1-8b-instant',
+    'JUDGE_MODEL':    'llama-3.1-8b-instant',  # can use 70b for higher accuracy
+    'CHUNK_SIZE':     128,
+    'CHUNK_OVERLAP':  15,
+    'TOP_K':          5,
+    'MAX_CONTEXT':    2000,
+    'SQL_RETRIES':    2,
+    'JUDGE_ENABLED':  True,   # LLM-as-judge on every SQL call
+    'JUDGE_RETRY_THRESHOLD': 3,  # retry if judge score < 3
+    'HUMAN_IN_LOOP':  False,  # set True to rate every answer
+    'TEMPERATURE':    0.0,
+
+    'TAVILY_ENABLED':  True,   # allow supervisor to web-search when needed
+    'TAVILY_MAX_RESULTS': 3,   # how many web results to fetch
+}
+
+# location → SQL conditions
+# derived from actual SCHL codes in data
+LOCATION_MAP = {
+    'ooty':        "(UPPER(revname) LIKE '%OOTY%' OR UPPER(school_code) LIKE '%OOTY%')",
+    'coonoor':     "(UPPER(school_code) LIKE '%CONR%' OR UPPER(school_name) LIKE '%COONOOR%')",
+    'gudalur':     "(UPPER(school_code) LIKE '%GDLR%' OR UPPER(school_name) LIKE '%GUDALUR%')",
+    'kunjappanai': "UPPER(school_name) LIKE '%KUNJAPPANAI%'",
+    'kargudi':     "UPPER(school_name) LIKE '%KARGUDI%'",
+    'mpalada':     "UPPER(school_name) LIKE '%PALADA%'",
+    'nilgiris':    "UPPER(district) LIKE '%NILGIRIS%'",
+    'masinagudi':  "UPPER(school_name) LIKE '%MASINAGUDI%'",
+    'kotagiri':    "UPPER(school_name) LIKE '%KOTAGIRI%'",
+    'coonoor':     "(UPPER(school_code) LIKE '%CONR%' OR UPPER(school_name) LIKE '%COONOOR%')",
+}
+
+# subject name normalization — clean noisy values from Excel
+SUBJECT_NORMALIZE = {
+    'AGRICULTURAL SCIENCE- THEORY': 'AGRICULTURAL SCIENCE',
+    'AGRICULTURAL SCIENCE ':        'AGRICULTURAL SCIENCE',
+    'BASIC ELECTRICAL ENGINEERING -': 'BASIC ELECTRICAL ENGINEERING',
+    'BASIC ELECTRICAL ENGINEERING ': 'BASIC ELECTRICAL ENGINEERING',
+    'BASIC ELECTRONICS ':            'BASIC ELECTRONICS',
+    'OFFICE MANAGEMENT ':            'OFFICE MANAGEMENT',
+    'TYPOGRAPHY AND COMPUTER ':      'TYPOGRAPHY AND COMPUTER',
+    'AUDITING ':                     'AUDITING',
+    'GHSS, KAGGUCHI ':               'GHSS, KAGGUCHI',
+    'GTRHSS, KUNJAPPANAI ':          'GTRHSS, KUNJAPPANAI',
+}
+
+GROQ_API_KEY   = os.getenv('GROQ_API_KEY')
+LANGCHAIN_KEY  = os.getenv('LANGCHAIN_API_KEY', '')
+os.environ['GROQ_API_KEY'] = GROQ_API_KEY or ''
+
+if LANGCHAIN_KEY:
+    os.environ['LANGCHAIN_TRACING_V2'] = 'true'
+    os.environ['LANGCHAIN_API_KEY']    = LANGCHAIN_KEY
+    os.environ['LANGCHAIN_PROJECT']    = 'dmu_prod'
+
+assert GROQ_API_KEY, 'Add GROQ_API_KEY to .env'
+TAVILY_API_KEY = os.getenv('TAVILY_API_KEY')
+os.environ['TAVILY_API_KEY'] = TAVILY_API_KEY or ''
+assert TAVILY_API_KEY, 'Add TAVILY_API_KEY to .env  (get at https://tavily.com)'
+tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+
+print('Config ready.')
+
+===== CELL 10 =====
+# =========================================================
+# CELL 7 — LLM + LLM-AS-JUDGE
+# =========================================================
+# LLM-as-Judge: a SEPARATE LLM call that evaluates
+# whether the generated SQL and answer are correct.
+#
+# Why: LLMs can generate plausible-looking but wrong SQL.
+# The judge catches this BEFORE showing to District Collector.
+# =========================================================
+
+from langchain_groq import ChatGroq
+
+llm   = ChatGroq(model=CFG['LLM_MODEL'],   temperature=CFG['TEMPERATURE'])
+judge = ChatGroq(model=CFG['JUDGE_MODEL'],  temperature=0.0)
+
+
+JUDGE_PROMPT = """You are an expert SQL auditor for educational analytics.
+Evaluate whether the SQL and answer correctly answer the user's question.
+
+Question: {question}
+SQL: {sql}
+SQL Result: {result}
+Answer: {answer}
+
+Evaluate on:
+1. sql_correct (bool): Does the SQL correctly answer the question?
+2. result_reasonable (bool): Does the result make logical sense?
+3. answer_grounded (bool): Is the answer based only on the SQL result?
+4. score (1-5): Overall quality (5=perfect)
+5. issues (list): List specific problems if any
+6. suggestion (str): How to fix if score < 4
+
+Known facts for validation:
+- All data is Nilgiris district, Tamil Nadu
+- Years are 2025 and 2026 only
+- Pass mark per subject is 35
+- In 2026 data, failures show as NULL in PASS column
+- Students take different subjects by group (commerce vs science)
+
+Return ONLY valid JSON, no other text:
+{{"sql_correct": bool, "result_reasonable": bool, "answer_grounded": bool,
+  "score": int, "issues": [str], "suggestion": str}}"""
+
+
+def llm_judge(question: str, sql: str, result: str, answer: str) -> dict:
+    """Evaluate SQL + answer quality. Returns dict with score and issues."""
+    if not CFG['JUDGE_ENABLED']:
+        return {'score': 5, 'issues': [], 'suggestion': '', 'sql_correct': True,
+                'result_reasonable': True, 'answer_grounded': True}
+    try:
+        prompt = JUDGE_PROMPT.format(
+            question=question, sql=sql[:500],
+            result=result[:300], answer=answer[:300]
+        )
+        resp = judge.invoke(prompt).content.strip()
+        # clean markdown fences if LLM adds them
+        if '```json' in resp: resp = resp.split('```json')[1].split('```')[0].strip()
+        elif '```'   in resp: resp = resp.split('```')[1].split('```')[0].strip()
+        return json.loads(resp)
+    except Exception as e:
+        logger.warning(f'Judge failed: {e}')
+        return {'score': 3, 'issues': [str(e)], 'suggestion': 'Judge parse error',
+                'sql_correct': True, 'result_reasonable': True, 'answer_grounded': True}
+
+
+print('LLM and judge ready.')
+
+===== CELL 11 =====
+# =========================================================
+# CELL 8 — SQL ENGINE WITH RETRY + JUDGE LOOP
+# =========================================================
+
+def generate_and_execute_sql(question: str) -> dict:
+    """
+    Full SQL pipeline:
+    1. Generate SQL from question
+    2. Execute on DuckDB
+    3. LLM-as-judge evaluates
+    4. If score < threshold: retry with judge feedback
+    5. Generate clean natural language answer
+    Returns: {answer, sql, result_df, judge, attempts}
+    """
+    sql, result_df, error = '', None, ''
+    judge_feedback = ''
+    attempts = 0
+
+    for attempt in range(CFG['SQL_RETRIES'] + 1):
+        attempts = attempt + 1
+
+        # build prompt with optional judge feedback
+        extra = ''
+        if judge_feedback:
+            extra = f'\nPREVIOUS ATTEMPT FAILED. Judge feedback: {judge_feedback}\nFix the SQL.\n'
+
+        prompt = SQL_SYSTEM_PROMPT.replace('{question}', question) + extra
+
+        try:
+            resp = llm.invoke(prompt).content.strip()
+            if '```sql' in resp: resp = resp.split('```sql')[1].split('```')[0].strip()
+            elif '```'  in resp: resp = resp.split('```')[1].split('```')[0].strip()
+            sql = resp
+
+            result_df = con.execute(sql).fetchdf()
+            error     = ''
+            logger.info(f'SQL attempt {attempts} succeeded: {sql[:60]}')
+
+        except Exception as e:
+            error = str(e)
+            judge_feedback = f'SQL execution error: {error}'
+            logger.warning(f'SQL attempt {attempts} failed: {error[:80]}')
+            time.sleep(0.5)
+            continue
+
+        # format result
+        if result_df is None or result_df.empty:
+            result_str = 'No matching records found.'
+        else:
+            result_str = result_df.to_string(index=False)
+
+        # generate natural language answer
+        answer_prompt = (
+            f'Question: {question}\n\n'
+            f'Data from database:\n{result_str}\n\n'
+            f'Rules:\n'
+           
+            f'- Use ONLY numbers from the data above\n'
+            f'- If data is empty, say so clearly\n'
+            f'- Plain text only, no code, no backticks\n'
+            f'- Be precise and actionable\nAnswer:'
+        )
+        answer = llm.invoke(answer_prompt).content.strip()
+
+        # LLM-as-judge evaluation
+        j = llm_judge(question, sql, result_str[:300], answer[:300])
+        logger.info(f'Judge score: {j["score"]}/5  issues: {j["issues"]}')
+
+        if j['score'] >= CFG['JUDGE_RETRY_THRESHOLD'] or attempt >= CFG['SQL_RETRIES']:
+            return {
+                'answer':     answer,
+                'sql':        sql,
+                'result_df':  result_df,
+                'result_str': result_str,
+                'judge':      j,
+                'attempts':   attempts,
+                'error':      None,
+            }
+        else:
+            # retry with judge feedback
+            judge_feedback = f'Score {j["score"]}/5. Issues: {j["issues"]}. Suggestion: {j["suggestion"]}'
+            logger.warning(f'Retrying due to low judge score: {judge_feedback}')
+            time.sleep(0.5)
+
+    return {
+        'answer':     f'Could not generate a correct answer after {attempts} attempts. Error: {error}',
+        'sql':        sql, 'result_df': None, 'result_str': error,
+        'judge':      {'score': 0}, 'attempts': attempts, 'error': error
+    }
+
+
+print('SQL engine ready.')
+

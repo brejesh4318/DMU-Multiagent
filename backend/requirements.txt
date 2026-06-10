@@ -1,0 +1,42 @@
+# Core
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.7.1
+pydantic-settings>=2.7.0
+python-dotenv>=1.0.1
+
+# Database  (Python 3.13 wheels available for these versions)
+duckdb>=1.2.0
+pandas>=2.2.3
+openpyxl>=3.1.4
+
+# LLM / LangChain — consistent 0.3.x ecosystem
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-groq>=0.2.0
+langchain-huggingface>=0.1.0
+langchain-community>=0.3.0
+langgraph>=0.2.0
+
+# RAG / Embeddings
+sentence-transformers>=3.0.0
+faiss-cpu>=1.8.0
+rank-bm25>=0.2.2
+pypdf>=4.2.0
+python-docx>=1.1.2
+
+# Visualization
+plotly>=5.22.0
+numpy>=1.26.4
+
+# Web search
+tavily-python>=0.3.3
+
+# Cache
+redis>=5.0.4
+
+# Logging / Monitoring
+structlog>=24.2.0
+
+# LangSmith
+langsmith>=0.2.0

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls tests *)",
+      "Bash(ls \"E:/CODING/ed/{backend\")"
+    ]
+  }
+}

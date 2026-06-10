@@ -1,0 +1,26 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	supervisor(supervisor)
+	analytics_agent(analytics_agent)
+	viz_agent(viz_agent)
+	rag_agent(rag_agent)
+	web_agent(web_agent)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> supervisor;
+	analytics_agent --> supervisor;
+	rag_agent --> supervisor;
+	supervisor -.-> __end__;
+	supervisor -.-> analytics_agent;
+	supervisor -.-> rag_agent;
+	supervisor -.-> viz_agent;
+	supervisor -.-> web_agent;
+	viz_agent --> supervisor;
+	web_agent --> supervisor;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
