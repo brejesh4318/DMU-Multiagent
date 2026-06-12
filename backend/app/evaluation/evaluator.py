@@ -214,13 +214,23 @@ class Evaluator:
             per_question=per_q,
         )
 
-    # 5: RAGAS metrics
+    # 5: RAGAS metrics  (ragas >= 0.2 API; tested against 0.4.3)
     def eval_ragas(self) -> RAGASMetrics:
         try:
-            from datasets import Dataset
-            from ragas import evaluate
-            from ragas.metrics import (answer_relevancy, context_precision,
-                                        context_recall, faithfulness)
+            # ragas hard-imports `ChatVertexAI` from the now-sunset
+            # langchain-community, which no longer ships that symbol. We never
+            # use Vertex with Groq, so stub the module to let the import succeed.
+            import sys, types
+            _vmod = "langchain_community.chat_models.vertexai"
+            if _vmod not in sys.modules:
+                _stub = types.ModuleType(_vmod)
+                _stub.ChatVertexAI = type("ChatVertexAI", (), {})
+                sys.modules[_vmod] = _stub
+
+            from ragas import EvaluationDataset, SingleTurnSample, evaluate
+            from ragas.metrics import (Faithfulness, ResponseRelevancy,
+                                        LLMContextPrecisionWithReference,
+                                        LLMContextRecall)
             from ragas.run_config import RunConfig
             from ragas.llms import LangchainLLMWrapper
             from ragas.embeddings import LangchainEmbeddingsWrapper
@@ -229,41 +239,55 @@ class Evaluator:
             from app.core.config import get_settings
 
             cfg = get_settings()
-            llm = ChatGroq(model=cfg.LLM_MODEL, temperature=0.0, api_key=cfg.GROQ_API_KEY)
-            emb = HuggingFaceEmbeddings(model_name=cfg.EMBED_MODEL)
+            llm = LangchainLLMWrapper(
+                ChatGroq(model=cfg.LLM_MODEL, temperature=0.0, api_key=cfg.GROQ_API_KEY))
+            emb = LangchainEmbeddingsWrapper(
+                HuggingFaceEmbeddings(model_name=cfg.EMBED_MODEL))
 
-            questions_list, answers_list, contexts_list, gt_list = [], [], [], []
+            # Build evaluation samples (ragas 0.2+ schema field names).
+            samples = []
             for qa in RAG_QA_SUITE:
                 ans, ctxs = self._rag.answer(qa["question"])
-                questions_list.append(qa["question"])
-                answers_list.append(ans)
-                contexts_list.append(ctxs)
-                gt_list.append(qa["ground_truth"])
+                samples.append(SingleTurnSample(
+                    user_input=qa["question"],
+                    response=ans,
+                    retrieved_contexts=ctxs,
+                    reference=qa["ground_truth"],
+                ))
                 time.sleep(self._delay)
 
-            ds = Dataset.from_dict({
-                "question": questions_list, "answer": answers_list,
-                "contexts": contexts_list,  "ground_truth": gt_list,
-            })
-
-            wrapped_llm = LangchainLLMWrapper(llm)
-            wrapped_emb = LangchainEmbeddingsWrapper(emb)
-            metrics     = [faithfulness, answer_relevancy, context_precision, context_recall]
-            for m in metrics:
-                m.llm = wrapped_llm
-            answer_relevancy.embeddings = wrapped_emb
+            dataset = EvaluationDataset(samples=samples)
+            # strictness=1 forces n=1 on generation: Groq rejects the n>1
+            # (multi-completion) request ResponseRelevancy issues by default.
+            metrics = [Faithfulness(), ResponseRelevancy(strictness=1),
+                       LLMContextPrecisionWithReference(), LLMContextRecall()]
 
             results = evaluate(
-                ds, metrics=metrics,
-                run_config=RunConfig(timeout=120, max_workers=1, max_wait=120),
+                dataset=dataset, metrics=metrics, llm=llm, embeddings=emb,
+                run_config=RunConfig(timeout=300, max_workers=1, max_wait=180),
+                show_progress=False, raise_exceptions=False,
             )
             df = results.to_pandas()
 
+            def _mean(*cols: str) -> float:
+                """Average the first present metric column (names vary by version).
+
+                A metric whose jobs all error out yields an all-NaN column whose
+                mean is NaN; coerce that to 0.0 so it never leaks into the JSON
+                report or threshold checks.
+                """
+                for c in cols:
+                    if c in df.columns:
+                        val = df[c].dropna().mean()
+                        return round(float(val), 3) if pd.notna(val) else 0.0
+                return 0.0
+
             return RAGASMetrics(
-                faithfulness=      round(float(df["faithfulness"].dropna().mean()),      3),
-                answer_relevancy=  round(float(df["answer_relevancy"].dropna().mean()),  3),
-                context_precision= round(float(df["context_precision"].dropna().mean()), 3),
-                context_recall=    round(float(df["context_recall"].dropna().mean()),    3),
+                faithfulness=      _mean("faithfulness"),
+                answer_relevancy=  _mean("answer_relevancy", "response_relevancy"),
+                context_precision= _mean("llm_context_precision_with_reference",
+                                         "context_precision"),
+                context_recall=    _mean("context_recall", "llm_context_recall"),
                 computed=True,
             )
         except Exception as e:
