@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(ls tests *)",
-      "Bash(ls \"E:/CODING/ed/{backend\")"
+      "Bash(ls \"E:/CODING/ed/{backend\")",
+      "PowerShell($p = \\(Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue\\).OwningProcess | Select-Object -Unique; if \\($p\\) { $p | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }; \"stopped PID\\(s\\): $p\" } else { \"nothing on port 3000\" })",
+      "Bash(.venv/Scripts/python.exe -m pip install \"langchain-core==1.4.0\" \"langchain==1.3.4\" \"langchain-community==0.4.2\" \"langchain-text-splitters==1.1.2\" \"langsmith==0.8.9\")",
+      "Bash(.venv/Scripts/python.exe -m pip install \"ragas==0.2.15\" datasets)",
+      "Bash(../.venv/Scripts/python.exe -c \"import app.agents.graph; print\\('app imports OK'\\)\")"
     ]
   }
 }
