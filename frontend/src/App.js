@@ -17,7 +17,7 @@ const EXAMPLES = [
   'Top 5 schools by English average score',
   'How many students failed overall in 2026?',
   'Failures in Physics vs Chemistry comparison',
-  'What is the re-examination policy?',
+  'What is SLAS?',
   'Trend of pass rates across 2025 and 2026',
 ];
 
@@ -232,6 +232,8 @@ function Message({ msg }) {
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [messages,  setMessages]  = useState([]);
+  // Stable per-session conversation id so the backend checkpointer keeps history.
+  const threadId = useRef(`t_${Math.random().toString(36).slice(2, 10)}`);
   const [input,     setInput]     = useState('');
   const [loading,   setLoading]   = useState(false);
   const [health,    setHealth]    = useState(null);
@@ -284,6 +286,7 @@ export default function App() {
         query: q,
         show_sql: true,
         show_judge: true,
+        thread_id: threadId.current,
       });
       setMessages(prev => [...prev, { role: 'assistant', response: data }]);
       // Refresh metrics

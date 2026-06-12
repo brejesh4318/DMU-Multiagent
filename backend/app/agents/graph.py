@@ -79,8 +79,10 @@ class AgentState(TypedDict):
 
 
 def _query(state: AgentState) -> str:
+    # Latest human turn, not the first — otherwise accumulated checkpointer
+    # history would pin the supervisor to the very first question forever.
     return next(
-        (m.content for m in state["messages"] if isinstance(m, HumanMessage)),
+        (m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
         "",
     )
 
@@ -243,8 +245,12 @@ def classify_intent(query: str) -> tuple[str, float]:
     return intent, confidence
  
  
-def get_conversational_reply(query: str) -> str:
-    """Tiny model for friendly replies — no tools, no RAG, no cost."""
+def get_conversational_reply(query: str, history: Optional[Sequence[BaseMessage]] = None) -> str:
+    """Tiny model for friendly replies — no tools, no RAG, no cost.
+
+    Prior turns are threaded in so the assistant can recall earlier context
+    (e.g. a name the user mentioned) across a conversation.
+    """
     cfg = get_settings()
     small_llm = ChatGroq(
         model="llama-3.1-8b-instant",
@@ -257,11 +263,18 @@ def get_conversational_reply(query: str) -> str:
         "Reply warmly and briefly (1-2 sentences). "
         "If relevant, mention you can help with student performance data or SLAS results."
     )
+    # Keep only the plain conversational turns (drop tool-call/ToolMessage noise)
+    # and trim to the most recent few to stay within the tiny model's budget.
+    prior = [
+        m for m in (history or [])
+        if isinstance(m, (HumanMessage, AIMessage))
+        and not getattr(m, "tool_calls", None)
+        and (m.content or "").strip()
+    ][-6:]
     try:
-        resp = small_llm.invoke([
-            SystemMessage(content=system),
-            HumanMessage(content=query),
-        ])
+        resp = small_llm.invoke(
+            [SystemMessage(content=system)] + prior + [HumanMessage(content=query)]
+        )
         return resp.content.strip()
     except Exception:
         return "Hey! Ask me anything about Nilgiris student performance or Tamil Nadu's Education performance ."
@@ -377,28 +390,26 @@ def supervisor_node(state: AgentState) -> dict:
  
         # Conversational → reply directly, no tool call, hits END immediately
         if intent == "conversational":
-            reply = get_conversational_reply(query)
+            # All prior turns; the current query is the trailing HumanMessage,
+            # so drop it here and let get_conversational_reply re-append it.
+            reply = get_conversational_reply(query, history=list(state["messages"])[:-1])
             logger.info("fast_path", route="conversational")
             return {"messages": [AIMessage(content=reply)]}
  
-        # Clear tool intent → synthetic tool call, skip 70b supervisor entirely
+        # Clear tool intent → synthetic tool call, skip the supervisor LLM entirely.
+        # Note "viz" maps to run_analytics, NOT run_viz: a chart query like
+        # "bar chart of school Math averages" is also a data question, so we fetch
+        # the data first. The post-tool second-hop logic above (wants_viz + sql_result)
+        # then adds the chart automatically. The classifier never emits a direct
+        # run_viz call — that avoids the "no data to visualize" dead-end.
         tool_map = {
             "analytics": "run_analytics",
             "rag":       "run_rag",
             "web":       "run_web",
-            "viz":       "run_viz",
+            "viz":       "run_analytics",
         }
         if intent in tool_map:
-            # Guard: viz needs prior analytics result
-            if intent == "viz" and not state.get("sql_result"):
-                return {"messages": [AIMessage(
-                    content=(
-                        "Please ask a data question first so I have results to visualize. "
-                        "Try: 'Show average marks by school' then ask for a chart."
-                    )
-                )]}
- 
-            logger.info("fast_path", route=intent)
+            logger.info("fast_path", route=intent, tool=tool_map[intent])
             synthetic_ai = AIMessage(
                 content="",
                 tool_calls=[{

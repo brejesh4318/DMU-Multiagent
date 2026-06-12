@@ -115,7 +115,7 @@ router = APIRouter()
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
-    query: str = Field(..., min_length=3, max_length=1000)
+    query: str = Field(..., min_length=2, max_length=1000)
     show_sql: bool = False
     show_judge: bool = False
     thread_id: Optional[str] = None
