@@ -13,7 +13,8 @@
   },
   "scripts": {
     "start": "react-scripts start",
-    "build": "react-scripts build"
+    "build": "react-scripts build",
+    "preview": "react-scripts build && npx --yes serve -s build -l 3000"
   },
   "proxy": "http://127.0.0.1:8000",
   "browserslist": {
