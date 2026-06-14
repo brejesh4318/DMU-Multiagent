@@ -127,5 +127,21 @@ def classify(query: str) -> QueryType:
     return "rag"
 
 
+def matched_route(query: str) -> QueryType | None:
+    """Regex-only routing with NO default. Returns 'rag'/'web'/'analytics' when a
+    keyword clearly matches, else None (the query is unroutable → the caller can
+    ask the human to clarify instead of guessing). Mirrors classify()'s priority
+    order but skips the LLM disambiguation and the rag fallback.
+    """
+    q = query.strip()
+    if _RAG.search(q):
+        return "rag"
+    if _WEB.search(q):
+        return "web"
+    if _ANALYTICS.search(q):
+        return "analytics"
+    return None
+
+
 def wants_viz(query: str) -> bool:
     return bool(_VIZ.search(query))

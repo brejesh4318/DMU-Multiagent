@@ -9,10 +9,12 @@ AI-Powered Educational Decision Intelligence for Nilgiris District
 | Category | What's included |
 |---|---|
 | **Agents** | LangGraph Supervisor, Analytics (SQL), RAG, Visualization, Web Search |
+| **Routing** | Two-layer (LLM classifier + regex), crash-proof fallback, **human-in-the-loop clarify** for cold/unroutable queries |
 | **Retrieval** | BGE Embeddings, BM25, RRF Fusion, Cross-Encoder Reranking, Parent-Child Chunking |
+| **Visualization** | Plotly chart planning → recharts render with on-bar value labels + auto 3-4 line summary |
 | **Evaluation** | Recall@5, Recall@10, MRR, nDCG, RAGAS, SQL Accuracy, Routing Accuracy, LLM-as-Judge |
 | **Monitoring** | LangSmith, Structured JSON Logs, Token Tracking, Cost Tracking |
-| **Deployment** | FastAPI, React, Redis Cache, Docker Compose |
+| **Deployment** | FastAPI, React, In-memory LRU Result Cache, Docker Compose |
 | **Data** | Auto-detect any .xlsx files + any sheet names, long-format normalization |
 
 ---
@@ -119,4 +121,3 @@ make ingest-rebuild  # also rebuild RAG index for new PDFs
 | `LANGCHAIN_API_KEY` | ✅ | LangSmith tracing |
 | `LLM_MODEL` | optional | Default: llama-3.1-8b-instant |
 | `JUDGE_MODEL` | optional | Default: llama-3.1-70b-versatile |
-| `REDIS_URL` | optional | Default: redis://localhost:6379 |

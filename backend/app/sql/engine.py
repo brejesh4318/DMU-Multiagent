@@ -11,14 +11,15 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from collections import OrderedDict
+from dataclasses import dataclass, field, replace
+from threading import Lock
 from typing import Optional
 
 import pandas as pd
 from langchain_groq import ChatGroq
 
 from app.core.config import get_settings
-from app.core.cache import cache_key, get_cached, set_cached
 from app.core.database import execute_query, get_schema_dict, get_sample_values
 from app.monitoring.telemetry import TokenUsage, get_logger, track_llm_call
 
@@ -84,6 +85,10 @@ class SQLResult:
 
 
 class SQLEngine:
+    # Bounded LRU result cache: a repeat question returns instantly at 0 tokens.
+    # Process-local, no TTL — cleared on backend restart or via clear_cache().
+    _CACHE_MAX = 256
+
     def __init__(self):
         cfg = get_settings()
         self.cfg   = cfg
@@ -92,6 +97,16 @@ class SQLEngine:
         self._gen_llm   = ChatGroq(model=cfg.SQL_MODEL, temperature=0.0, api_key=cfg.GROQ_API_KEY)
         self._llm       = ChatGroq(model=cfg.LLM_MODEL, temperature=0.0, api_key=cfg.GROQ_API_KEY)
         self._judge_llm = ChatGroq(model=cfg.LLM_MODEL, temperature=0.0, api_key=cfg.GROQ_API_KEY)
+        # question (normalized) -> successful SQLResult. OrderedDict = LRU order.
+        self._cache: "OrderedDict[str, SQLResult]" = OrderedDict()
+        self._cache_lock = Lock()
+
+    def clear_cache(self) -> int:
+        """Drop all cached results (e.g. after re-ingesting data). Returns count cleared."""
+        with self._cache_lock:
+            n = len(self._cache)
+            self._cache.clear()
+            return n
 
     # Location → SQL condition mapping (mirrors notebook LOCATION_MAP)
     LOCATION_MAP: dict[str, str] = {
@@ -293,22 +308,33 @@ SQL:"""
             return JudgeResult(score=3), usage
 
     def run(self, question: str) -> SQLResult:
-        t_start = time.perf_counter()
-
-        # ── Item 1: result cache — repeats cost 0 tokens ──────────────────────
-        key = cache_key("sql", question)
-        cached = get_cached(key)
-        if cached:
-            latency = round((time.perf_counter() - t_start) * 1000, 1)
+        # ── Item 1: LRU result cache — repeats cost 0 tokens ──────────────────
+        # Normalize so casing/whitespace variants share one entry. The prompt
+        # forces UPPER() for all text matches, so a lowercased question yields
+        # identical SQL — safe to feed the pipeline the normalized text.
+        key = question.lower().strip()
+        with self._cache_lock:
+            hit = self._cache.get(key)
+            if hit is not None:
+                self._cache.move_to_end(key)          # mark most-recently-used
+        if hit is not None:
             logger.info("sql_cache_hit", question=question[:60])
-            return SQLResult(
-                answer=cached.get("answer", ""),
-                sql=cached.get("sql", ""),
-                result_df=pd.DataFrame(cached.get("records") or []),
-                judge=JudgeResult(score=int(cached.get("judge_score", 5))),
-                token_usage=TokenUsage(latency_ms=latency),
-                attempts=0, latency_ms=latency,
-            )
+            # No LLM call happened → report 0 tokens so metrics stay honest.
+            return replace(hit, token_usage=TokenUsage(latency_ms=0.0),
+                           attempts=0, latency_ms=0.0)
+
+        result = self._run_pipeline(key)
+        # Only cache genuine successes — never memoize a transient failure.
+        if result.error is None:
+            with self._cache_lock:
+                self._cache[key] = result
+                self._cache.move_to_end(key)
+                while len(self._cache) > self._CACHE_MAX:
+                    self._cache.popitem(last=False)   # evict least-recently-used
+        return result
+
+    def _run_pipeline(self, question: str) -> SQLResult:
+        t_start = time.perf_counter()
 
         prompt_tpl = self._build_prompt()
         feedback   = ""
@@ -322,15 +348,6 @@ SQL:"""
         def _finalize(judge: JudgeResult) -> SQLResult:
             latency = round((time.perf_counter() - t_start) * 1000, 1)
             total_usage.latency_ms = latency
-            # Cache JSON-safe records (to_json handles numpy/NaN) for future repeats
-            records = (
-                json.loads(result_df.to_json(orient="records"))
-                if result_df is not None and not result_df.empty else []
-            )
-            set_cached(key, {
-                "sql": sql, "answer": answer,
-                "records": records, "judge_score": judge.score,
-            })
             return SQLResult(
                 answer=answer, sql=sql, result_df=result_df,
                 judge=judge, token_usage=total_usage,

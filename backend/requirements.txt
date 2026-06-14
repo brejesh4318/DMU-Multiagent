@@ -36,9 +36,6 @@ numpy>=1.26.4
 # Web search
 tavily-python>=0.3.3
 
-# Cache
-redis>=5.0.4
-
 # Logging / Monitoring
 structlog>=24.2.0
 

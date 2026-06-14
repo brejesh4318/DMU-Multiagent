@@ -49,9 +49,6 @@ class Settings(BaseSettings):
             self.TAVILY_ENABLED = True
         return self
 
-    # Redis
-    REDIS_URL: str = "redis://localhost:6379"
-    CACHE_TTL: int = 3600
 
     # LangSmith
     LANGCHAIN_API_KEY: str = Field("", env="LANGCHAIN_API_KEY")

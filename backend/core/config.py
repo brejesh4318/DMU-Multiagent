@@ -41,9 +41,6 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str = Field("", env="TAVILY_API_KEY")
     TAVILY_ENABLED: bool = True
 
-    # Redis
-    REDIS_URL: str = "redis://localhost:6379"
-    CACHE_TTL: int = 3600
 
     # LangSmith
     LANGCHAIN_API_KEY: str = Field("", env="LANGCHAIN_API_KEY")

@@ -129,7 +129,7 @@ class QueryResponse(BaseModel):
     judge_score:     Optional[int]        = None
     judge_issues:    list[str]            = []
     chart:           Optional[dict]       = None
-    recommendations: list[dict]           = []
+    summary:         str                  = ""
     latency_ms:      float                = 0.0
     tokens:          int                  = 0
     cost_usd:        float                = 0.0
@@ -174,7 +174,7 @@ async def query(req: QueryRequest) -> QueryResponse:
                 "rag_result":      {},
                 "web_result":      {},
                 "chart_output":    {},
-                "recommendations": [],
+                "summary":         "",
                 "metrics":         {},
             },
             config={"configurable": {"thread_id": thread_id}},
@@ -213,7 +213,7 @@ async def query(req: QueryRequest) -> QueryResponse:
         judge_score=sql_r.get("judge_score") if req.show_judge else None,
         judge_issues=sql_r.get("judge_issues", []) if req.show_judge else [],
         chart=state.get("chart_output") or None,
-        recommendations=state.get("recommendations", []),
+        summary=state.get("summary", ""),
         latency_ms=latency,
         tokens=sql_r.get("tokens", 0),
         cost_usd=sql_r.get("cost_usd", 0.0),
@@ -228,6 +228,13 @@ async def ingest(req: IngestRequest) -> IngestResponse:
         counts = ingest_all_excel(req.data_dir)
     except Exception as e:
         return IngestResponse(status="error", error=str(e))
+
+    # Data changed → drop cached SQL answers so stale results aren't served.
+    try:
+        from app.agents.graph import _sql
+        _sql().clear_cache()
+    except Exception as e:
+        logger.warning("sql_cache_clear_error", error=str(e))
 
     if req.rebuild_index:
         try:

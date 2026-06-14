@@ -19,7 +19,7 @@ make frontend         # cd frontend && npm install && npm start  (port 3000)
 make eval             # full evaluation suite (backend/evaluate.py)
 make eval-fast        # evaluation without RAGAS (much faster)
 make check            # preflight: parse all app/*.py, check .env, check data/*.xlsx
-make docker-up        # docker compose up -d (backend + redis + frontend)
+make docker-up        # docker compose up -d (backend + frontend)
 make clean            # remove __pycache__, .pytest_cache, faiss_store
 ```
 

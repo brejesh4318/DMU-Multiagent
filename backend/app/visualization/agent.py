@@ -3,10 +3,12 @@ Visualization Agent — converts DuckDB DataFrames to Plotly charts.
 Auto-selects chart type based on query keywords and data shape.
 """
 from __future__ import annotations
+import base64
 import json
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -17,6 +19,29 @@ from app.monitoring.telemetry import get_logger
 logger = get_logger(__name__)
 
 _VALID_TYPES = {"line", "bar", "pie", "heatmap"}
+
+
+def _decode_typed_arrays(obj: Any) -> Any:
+    """Plotly 6 serializes numeric arrays as base64 typed-array blobs
+    (``{"dtype": "f8", "bdata": "...", "shape": "..."}``). The recharts frontend
+    expects plain JSON lists, so decode any such blob back into a list. Without
+    this, numeric series (bar/line ``y`` values) arrive as an object and every
+    point reads as 0 → blank chart.
+    """
+    if isinstance(obj, dict):
+        if "bdata" in obj and "dtype" in obj:
+            try:
+                arr = np.frombuffer(base64.b64decode(obj["bdata"]), dtype=obj["dtype"])
+                shape = obj.get("shape")
+                if shape:
+                    arr = arr.reshape([int(s) for s in str(shape).split(",")])
+                return arr.tolist()
+            except Exception:
+                return obj
+        return {k: _decode_typed_arrays(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_decode_typed_arrays(v) for v in obj]
+    return obj
 
 
 @dataclass
@@ -147,7 +172,7 @@ def render(df: Optional[pd.DataFrame], query: str, title: Optional[str] = None) 
             font={"family": "Inter, sans-serif"},
             margin={"l": 40, "r": 20, "t": 50, "b": 40},
         )
-        chart_json = json.loads(fig.to_json())
+        chart_json = _decode_typed_arrays(json.loads(fig.to_json()))
         html       = fig.to_html(full_html=False, include_plotlyjs="cdn")
         logger.info("chart_rendered", type=ctype, rows=len(df))
         return ChartOutput(chart_json=chart_json, chart_type=ctype, title=t, html=html)

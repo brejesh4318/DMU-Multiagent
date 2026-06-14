@@ -37,7 +37,7 @@ from app.monitoring.telemetry import (
     RequestMetrics, TokenUsage, get_logger,
     get_metrics_store, track_llm_call,
 )
-from app.agents.router import classify as route_classify, wants_viz
+from app.agents.router import matched_route, wants_viz
 from app.rag.pipeline import RAGPipeline
 from app.sql.engine import SQLEngine
 from app.visualization.agent import render
@@ -74,7 +74,7 @@ class AgentState(TypedDict):
     rag_result:      dict
     web_result:      dict
     chart_output:    dict
-    recommendations: list
+    summary:         str
     metrics:         dict
 
 
@@ -85,6 +85,71 @@ def _query(state: AgentState) -> str:
         (m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
         "",
     )
+
+
+def _has_prior_context(state: AgentState) -> bool:
+    """True if this thread already has an earlier answer to lean on — i.e. the
+    current query is a follow-up. Used by the hybrid HITL gate: with context we
+    let the supervisor route using history instead of asking the user to clarify.
+    The trailing message is the current human turn, so we scan everything before it.
+    """
+    return any(
+        isinstance(m, AIMessage) and (m.content or "").strip()
+        for m in state["messages"][:-1]
+    )
+
+
+def _clarification_message(intent: str) -> AIMessage:
+    """Human-in-the-loop: when neither the classifier nor the regex can route a
+    query, ask the user to rephrase instead of guessing. Includes a best-guess
+    hint (from the low-confidence classifier) and a few example prompts.
+    """
+    hint = {
+        "analytics": "student performance data (marks, pass/fail rates, school rankings)",
+        "rag":       "a policy or SLAS report document",
+        "web":       "current information from the web",
+    }.get(intent)
+    guess = f" Did you perhaps mean {hint}?" if hint else ""
+    body = (
+        "I'm not sure what you're asking about, so I'd rather check than guess."
+        + guess
+        + "\n\nCould you rephrase with a bit more detail? For example:\n"
+        '  • "Average Math marks in Ooty"\n'
+        '  • "Compare pass % between boys and girls in Gudalur"\n'
+        '  • "What does the SLAS report say about learning outcomes?"'
+    )
+    return AIMessage(content=body)
+
+
+def _summarize(query: str, answer: str, records: Optional[list] = None) -> str:
+    """A concise 3-4 line plain-text summary of a result, tailored to the query.
+
+    Replaces the old per-query 'recommendations'. For analytics the actual rows
+    are included so the summary is grounded in the data, not just the short answer.
+    Falls back to the answer on any LLM error.
+    """
+    if not (answer or records):
+        return ""
+    cfg = get_settings()
+    data_ctx = ""
+    if records:
+        try:
+            import pandas as pd
+            data_ctx = "\nKey data:\n" + pd.DataFrame(records).head(15).to_string(index=False)
+        except Exception:
+            data_ctx = ""
+    prompt = (
+        f"User question: {query}\n"
+        f"Result: {answer}{data_ctx}\n\n"
+        "Summarize the key findings for the user in 3-4 short lines of plain text. "
+        "No bullet points, no headings, no preamble — just the summary."
+    )
+    try:
+        llm = ChatGroq(model=cfg.LLM_MODEL, temperature=0.2, api_key=cfg.GROQ_API_KEY)
+        return (llm.invoke(prompt).content or "").strip() or answer
+    except Exception as e:
+        logger.warning("summary_error", error=str(e))
+        return answer
 
 
 # ── Tools ──────────────────────────────────────────────────────────────────────
@@ -420,6 +485,14 @@ def supervisor_node(state: AgentState) -> dict:
             )
             return {"messages": [synthetic_ai]}
  
+    # ── Human-in-the-loop (hybrid): low confidence AND no regex keyword AND no
+    # prior conversation → ask, don't guess. If there IS prior context, fall
+    # through to Layer 2 so the supervisor can route the follow-up using history.
+    if matched_route(query) is None and not _has_prior_context(state):
+        logger.info("clarify_request", reason="cold_low_confidence_no_keyword",
+                    confidence=confidence, query=query[:60])
+        return {"messages": [_clarification_message(intent)]}
+
     # ── Layer 2: full supervisor LLM (ambiguous or low confidence) ────────────
     logger.info("slow_path", reason="ambiguous_or_low_confidence", confidence=confidence)
  
@@ -451,7 +524,14 @@ def supervisor_node(state: AgentState) -> dict:
         # can't crash and always produces a schema-valid {"question": ...} call.
         logger.warning("supervisor_llm_failed", error=str(e))
 
-    route = "viz" if (wants_viz(query) and state.get("sql_result")) else route_classify(query)
+    if wants_viz(query) and state.get("sql_result"):
+        route = "viz"
+    else:
+        route = matched_route(query)
+        # Regex also can't route → last-resort human-in-the-loop ask.
+        if route is None:
+            logger.info("clarify_request", reason="regex_fallback_unroutable", query=query[:60])
+            return {"messages": [_clarification_message(intent)]}
     tool_map = {
         "analytics": "run_analytics",
         "rag":       "run_rag",
@@ -497,28 +577,6 @@ def tools_node_wrapper(state: AgentState) -> dict:
             if name == "run_analytics":
                 result = _sql().run(q)
                 latency = round((time.perf_counter() - t0) * 1000, 1)
-
-                # Build recommendations
-                recs = []
-                if result.result_df is not None and not result.result_df.empty:
-                    cfg = get_settings()
-                    rec_llm = ChatGroq(model=cfg.LLM_MODEL, temperature=0.1, api_key=cfg.GROQ_API_KEY)
-                    try:
-                        rec_prompt = (
-                            f"Based on this educational data for Nilgiris district:\n"
-                            f"{result.result_df.head(10).to_string(index=False)}\n\n"
-                            f"Original question: {q}\n\n"
-                            "Give exactly 2 short, actionable recommendations. "
-                            "One line each, numbered list only:"
-                        )
-                        rec_resp = rec_llm.invoke(rec_prompt)
-                        recs = [
-                            {"rank": i + 1, "text": line.lstrip("0123456789.) ").strip()}
-                            for i, line in enumerate(rec_resp.content.strip().splitlines())
-                            if line.strip()
-                        ][:2]
-                    except Exception:
-                        pass
 
                 # Serialize DataFrame
                 result_records, result_columns = [], []
@@ -572,7 +630,6 @@ def tools_node_wrapper(state: AgentState) -> dict:
                     "cost_usd":       float(result.token_usage.cost_usd),
                     "error":          str(result.error) if result.error else None,
                 }
-                updates["recommendations"] = recs
                 updates["query_type"] = "analytics"
                 tool_result = result.answer
 
@@ -640,6 +697,8 @@ def tools_node_wrapper(state: AgentState) -> dict:
                     "html":       out.html,
                     "error":      out.error,
                 }
+                # Charts have no prose of their own → give a 3-4 line summary of the plotted data.
+                updates["summary"] = _summarize(q, sql_res.get("answer", ""), records)
                 tool_result = f"Chart rendered: {out.title} ({out.chart_type})"
 
             else:

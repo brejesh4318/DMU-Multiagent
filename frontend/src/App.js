@@ -2,12 +2,19 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList
 } from 'recharts';
 import './index.css';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
 const COLORS = ['#58a6ff','#3fb950','#f0883e','#f85149','#d2a8ff','#79c0ff'];
+
+// On-chart value label: drop trailing decimals for whole numbers, else 1 dp.
+const fmtLabel = (v) => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '';
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+};
 
 // ── Example queries ───────────────────────────────────────────────────────────
 const EXAMPLES = [
@@ -24,10 +31,6 @@ const EXAMPLES = [
 // ── Utility components ────────────────────────────────────────────────────────
 function Badge({ type, children }) {
   return <span className={`badge badge-${type}`}>{children}</span>;
-}
-
-function TypeBadge({ type }) {
-  return <Badge type={type}>{type.toUpperCase()}</Badge>;
 }
 
 function JudgeBadge({ score }) {
@@ -70,7 +73,9 @@ function ChartPanel({ chart }) {
             <XAxis dataKey="name" stroke="#6e7681" tick={{ fontSize: 10 }} />
             <YAxis stroke="#6e7681" tick={{ fontSize: 10 }} />
             <Tooltip contentStyle={{ background: '#161b22', border: '1px solid #21262d', borderRadius: 8, fontSize: 11 }} />
-            <Line type="monotone" dataKey="value" stroke="#58a6ff" strokeWidth={2} dot={{ fill: '#58a6ff', r: 3 }} />
+            <Line type="monotone" dataKey="value" stroke="#58a6ff" strokeWidth={2} dot={{ fill: '#58a6ff', r: 3 }}>
+              <LabelList dataKey="value" position="top" fill="#c9d1d9" fontSize={9} formatter={fmtLabel} />
+            </Line>
           </LineChart>
         ) : (
           <BarChart data={data}>
@@ -80,6 +85,7 @@ function ChartPanel({ chart }) {
             <Tooltip contentStyle={{ background: '#161b22', border: '1px solid #21262d', borderRadius: 8, fontSize: 11 }} />
             <Bar dataKey="value" radius={[4, 4, 0, 0]}>
               {data.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+              <LabelList dataKey="value" position="top" fill="#c9d1d9" fontSize={9} formatter={fmtLabel} />
             </Bar>
           </BarChart>
         )}
@@ -88,78 +94,23 @@ function ChartPanel({ chart }) {
   );
 }
 
-// ── Recommendations ───────────────────────────────────────────────────────────
-function Recommendations({ recs }) {
-  if (!recs?.length) return null;
-  const priorities = ['high', 'medium', 'low'];
+// ── Summary ───────────────────────────────────────────────────────────────────
+function Summary({ text }) {
+  if (!text?.trim()) return null;
   return (
     <div className="recs">
       <div style={{ fontSize: 11, color: '#6e7681', marginBottom: 4, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1 }}>
-        Recommended Actions
+        Summary
       </div>
-      {recs.slice(0, 3).map((r, i) => (
-        <div key={i} className={`rec-card ${priorities[i] || 'low'}`}>
-          <div className="rec-header">
-            <span className="rec-rank">#{r.rank || i + 1}</span>
-            <span style={{ fontSize: 10, color: '#6e7681', textTransform: 'capitalize' }}>
-              {priorities[i] || 'low'} priority
-            </span>
-          </div>
-          <div className="rec-text">{r.text || r}</div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Metrics panel ─────────────────────────────────────────────────────────────
-function MetricsPanel({ metrics }) {
-  if (!metrics) return null;
-  const breakdown = metrics.query_type_breakdown || {};
-  const total = metrics.total_requests || 1;
-  return (
-    <div className="metrics-panel">
-      <div style={{ fontSize: 11, fontWeight: 600, color: '#8b949e' }}>System Metrics</div>
-      <div className="metrics-grid">
-        <div className="metric-box">
-          <div className="metric-val">{metrics.total_requests || 0}</div>
-          <div className="metric-lbl">Total Queries</div>
-        </div>
-        <div className="metric-box">
-          <div className="metric-val">{metrics.avg_latency_ms || 0}ms</div>
-          <div className="metric-lbl">Avg Latency</div>
-        </div>
-        <div className="metric-box">
-          <div className="metric-val">{metrics.avg_judge_score || '—'}</div>
-          <div className="metric-lbl">Avg Judge Score</div>
-        </div>
-        <div className="metric-box">
-          <div className="metric-val">${(metrics.total_cost_usd || 0).toFixed(4)}</div>
-          <div className="metric-lbl">Total Cost</div>
-        </div>
+      <div className="rec-card">
+        <div className="rec-text" style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{text}</div>
       </div>
-      {Object.keys(breakdown).length > 0 && (
-        <div className="routing-bar">
-          {Object.entries(breakdown).map(([type, count]) => (
-            <div key={type} className="routing-item">
-              <div className="routing-label">
-                <span style={{ textTransform: 'capitalize' }}>{type}</span>
-                <span>{count}</span>
-              </div>
-              <div className="routing-track">
-                <div className="routing-fill" style={{ width: `${(count / total) * 100}%` }} />
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
 
 // ── Message component ─────────────────────────────────────────────────────────
 function Message({ msg }) {
-  const [showSql, setShowSql] = useState(false);
 
   if (msg.role === 'user') {
     return (
@@ -181,10 +132,9 @@ function Message({ msg }) {
         <div className="msg-content">
           <div className="msg-header">
             <span className="msg-label">DMU Analytics</span>
-            {r.query_type && <TypeBadge type={r.query_type} />}
             <JudgeBadge score={r.judge_score} />
             <span style={{ fontSize: 10, color: '#6e7681', marginLeft: 'auto' }}>
-              {r.latency_ms}ms · {r.tokens} tokens · ${(r.cost_usd || 0).toFixed(5)}
+              {r.latency_ms}ms · {r.tokens} tokens
             </span>
           </div>
 
@@ -196,15 +146,6 @@ function Message({ msg }) {
             {r.error && (
               <div style={{ marginTop: 8, fontSize: 11, color: '#f85149' }}>
                 Error: {r.error}
-              </div>
-            )}
-
-            {r.sql && (
-              <div>
-                <button className="sql-toggle" onClick={() => setShowSql(v => !v)}>
-                  {showSql ? '▼ Hide SQL' : '▶ Show generated SQL'}
-                </button>
-                {showSql && <pre className="sql-block">{r.sql}</pre>}
               </div>
             )}
 
@@ -222,7 +163,7 @@ function Message({ msg }) {
           </div>
 
           {r.chart && <ChartPanel chart={r.chart} />}
-          {r.recommendations?.length > 0 && <Recommendations recs={r.recommendations} />}
+          {r.summary && <Summary text={r.summary} />}
         </div>
       </div>
     </div>
@@ -236,9 +177,6 @@ export default function App() {
   const threadId = useRef(`t_${Math.random().toString(36).slice(2, 10)}`);
   const [input,     setInput]     = useState('');
   const [loading,   setLoading]   = useState(false);
-  const [health,    setHealth]    = useState(null);
-  const [metrics,   setMetrics]   = useState(null);
-  const [showMetrics, setShowMetrics] = useState(false);
   const textareaRef = useRef(null);
   const bottomRef   = useRef(null);
 
@@ -256,23 +194,6 @@ export default function App() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Load health + metrics
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const [h, m] = await Promise.all([
-          axios.get(`${API}/health`),
-          axios.get(`${API}/metrics`),
-        ]);
-        setHealth(h.data);
-        setMetrics(m.data);
-      } catch {}
-    };
-    load();
-    const interval = setInterval(load, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
   const send = useCallback(async () => {
     const q = input.trim();
     if (!q || loading) return;
@@ -289,9 +210,6 @@ export default function App() {
         thread_id: threadId.current,
       });
       setMessages(prev => [...prev, { role: 'assistant', response: data }]);
-      // Refresh metrics
-      const m = await axios.get(`${API}/metrics`);
-      setMetrics(m.data);
     } catch (e) {
       // Safely stringify FastAPI error detail (can be string or array of validation objects)
       const rawDetail = e.response?.data?.detail;
@@ -361,30 +279,6 @@ export default function App() {
         {/* Topbar */}
         <div className="topbar">
           <div className="topbar-title">Educational Decision Intelligence</div>
-          <div className="topbar-metrics">
-            {health && (
-              <span className={`metric-chip ${health.status === 'ok' ? 'green' : ''}`}>
-                DB {health.status === 'ok' ? '●' : '○'} {health.marks_rows?.toLocaleString()} rows
-              </span>
-            )}
-            {metrics && (
-              <>
-                <span className="metric-chip blue">
-                  {metrics.total_requests} queries
-                </span>
-                <span className="metric-chip">
-                  ${(metrics.total_cost_usd || 0).toFixed(4)} cost
-                </span>
-                <span
-                  className="metric-chip"
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => setShowMetrics(v => !v)}
-                >
-                  📊 Metrics
-                </span>
-              </>
-            )}
-          </div>
         </div>
 
         {/* Chat area */}
@@ -410,9 +304,6 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-              )}
-              {showMetrics && metrics && (
-                <MetricsPanel metrics={metrics} />
               )}
             </>
           )}
